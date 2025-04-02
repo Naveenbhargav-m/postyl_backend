@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"postly.com/integrations/types"
 )
 
 // Constants for LinkedIn API
@@ -35,47 +37,6 @@ type LinkedInClient struct {
 }
 
 // UserProfile represents a LinkedIn user profile
-type UserProfile struct {
-	ID              string `json:"id"`
-	FirstName       string `json:"firstName"`
-	LastName        string `json:"lastName"`
-	ProfilePicture  string `json:"profilePicture"`
-	Email           string `json:"email"`
-	Headline        string `json:"headline"`
-	Industry        string `json:"industry"`
-	Country         string `json:"country"`
-	CurrentPosition string `json:"currentPosition"`
-}
-
-// CompanyPage represents a LinkedIn company page
-type CompanyPage struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Logo        string `json:"logo"`
-	Website     string `json:"website"`
-	Industry    string `json:"industry"`
-	Size        string `json:"size"`
-	Followers   int    `json:"followers"`
-}
-
-// PostResponse represents a response from creating a post
-type PostResponse struct {
-	ID     string `json:"id"`
-	Status string `json:"status,omitempty"`
-}
-
-// PostMetrics represents engagement metrics for a post
-type PostMetrics struct {
-	Impressions    int     `json:"impressions"`
-	Clicks         int     `json:"clicks"`
-	Likes          int     `json:"likes"`
-	Comments       int     `json:"comments"`
-	Shares         int     `json:"shares"`
-	Engagement     int     `json:"engagement"`
-	CTR            float64 `json:"ctr"`
-	EngagementRate float64 `json:"engagementRate"`
-}
 
 // NewLinkedInClient creates a new LinkedIn API client
 func NewLinkedInClient(clientID, clientSecret, redirectURI string) *LinkedInClient {
@@ -87,13 +48,14 @@ func NewLinkedInClient(clientID, clientSecret, redirectURI string) *LinkedInClie
 	}
 }
 
-// GetAuthURL generates the OAuth URL for authorization
-func (c *LinkedInClient) GetAuthURL(scopes []string) string {
+func (c *LinkedInClient) GetAuthURL(scopes []byte) string {
+	scopesStr := []string{}
+	_ = json.Unmarshal(scopes, &scopesStr)
 	params := url.Values{}
 	params.Add("response_type", "code")
 	params.Add("client_id", c.ClientID)
 	params.Add("redirect_uri", c.RedirectURI)
-	params.Add("scope", strings.Join(scopes, " "))
+	params.Add("scope", strings.Join(scopesStr, " "))
 	// params.Add("state", generateRandomState())
 
 	return fmt.Sprintf("%s?%s", AuthURL, params.Encode())
@@ -173,7 +135,7 @@ func (c *LinkedInClient) RefreshAccessToken(refreshToken string) (*TokenResponse
 }
 
 // GetUserProfile retrieves the authenticated user's profile
-func (c *LinkedInClient) GetUserProfile() (*UserProfile, error) {
+func (c *LinkedInClient) GetUserProfile() ([]byte, error) {
 	if c.AccessToken == "" {
 		return nil, errors.New("access token is required")
 	}
@@ -210,7 +172,7 @@ func (c *LinkedInClient) GetUserProfile() (*UserProfile, error) {
 	}
 
 	// Extract the necessary fields from the complex structure
-	profile := &UserProfile{
+	profile := &types.LinkedInUserProfile{
 		ID: rawProfile["id"].(string),
 	}
 
@@ -246,11 +208,11 @@ func (c *LinkedInClient) GetUserProfile() (*UserProfile, error) {
 		}
 	}
 
-	return profile, nil
+	return json.Marshal(profile)
 }
 
 // GetCompanyPages retrieves company pages administered by the user
-func (c *LinkedInClient) GetCompanyPages() ([]CompanyPage, error) {
+func (c *LinkedInClient) GetCompanyPages() ([]byte, error) {
 	if c.AccessToken == "" {
 		return nil, errors.New("access token is required")
 	}
@@ -288,7 +250,7 @@ func (c *LinkedInClient) GetCompanyPages() ([]CompanyPage, error) {
 	}
 
 	// Retrieve details for each company page
-	var companyPages []CompanyPage
+	var companyPages []types.LinkedInCompanyPage
 
 	for _, org := range orgResp.Elements {
 		orgID := org.OrganizationTarget
@@ -315,7 +277,7 @@ func (c *LinkedInClient) GetCompanyPages() ([]CompanyPage, error) {
 		}
 		detailsResp.Body.Close()
 
-		page := CompanyPage{
+		page := types.LinkedInCompanyPage{
 			ID: orgID,
 		}
 
@@ -336,11 +298,17 @@ func (c *LinkedInClient) GetCompanyPages() ([]CompanyPage, error) {
 		companyPages = append(companyPages, page)
 	}
 
-	return companyPages, nil
+	return json.Marshal(companyPages)
 }
 
 // CreateTextPost creates a simple text post
-func (c *LinkedInClient) CreateTextPost(text string, authorType string, authorID string) (*PostResponse, error) {
+func (c *LinkedInClient) CreateTextPost(input []byte) ([]byte, error) {
+	var text, authorType, authorID string
+	inputmap := map[string]interface{}{}
+	json.Unmarshal(input, &inputmap)
+	text, _ = inputmap["text"].(string)
+	authorType, _ = inputmap["author_type"].(string)
+	authorID, _ = inputmap["author_id"].(string)
 	if c.AccessToken == "" {
 		return nil, errors.New("access token is required")
 	}
@@ -353,7 +321,9 @@ func (c *LinkedInClient) CreateTextPost(text string, authorType string, authorID
 		// If no author ID is provided and type is person, use the authenticated user
 		if c.UserID == "" {
 			// Try to get the user profile if we don't have the ID
-			profile, err := c.GetUserProfile()
+			inp, err := c.GetUserProfile()
+			var profile types.LinkedInUserProfile
+			_ = json.Unmarshal(inp, &profile)
 			if err != nil {
 				return nil, fmt.Errorf("could not determine user ID: %v", err)
 			}
@@ -415,9 +385,11 @@ func (c *LinkedInClient) CreateTextPost(text string, authorType string, authorID
 		return nil, errors.New("invalid post response, no ID found")
 	}
 
-	return &PostResponse{
+	out := types.LinkedInPostResponse{
 		ID: postID,
-	}, nil
+	}
+	return json.Marshal(out)
+
 }
 
 // InitiateImageUpload prepares an image upload
@@ -553,25 +525,35 @@ func (c *LinkedInClient) UploadImage(imagePath string) (string, error) {
 
 // CreateImagePost creates a post with an image
 func (c *LinkedInClient) CreateImagePost(
-	text string,
-	imageAssetURN string,
-	authorType string,
-	authorID string,
-) (*PostResponse, error) {
+	input []byte,
+) ([]byte, error) {
 	if c.AccessToken == "" {
 		return nil, errors.New("access token is required")
 	}
 
+	var text,
+		imageAssetURN,
+		authorType,
+		authorID string
+
+	inputmap := map[string]interface{}{}
+	json.Unmarshal(input, &inputmap)
+	text, _ = inputmap["text"].(string)
+	imageAssetURN, _ = inputmap["image_url"].(string)
+	authorType, _ = inputmap["author_type"].(string)
+	authorID, _ = inputmap["author_id"].(string)
 	if authorType == "" {
 		authorType = "person"
 	}
 
 	if authorID == "" && authorType == "person" {
 		if c.UserID == "" {
-			profile, err := c.GetUserProfile()
+			profileData, err := c.GetUserProfile()
 			if err != nil {
 				return nil, fmt.Errorf("could not determine user ID: %v", err)
 			}
+			profile := types.LinkedInUserProfile{}
+			json.Unmarshal(profileData, &profile)
 			authorID = profile.ID
 		} else {
 			authorID = c.UserID
@@ -642,27 +624,32 @@ func (c *LinkedInClient) CreateImagePost(
 		return nil, errors.New("invalid post response, no ID found")
 	}
 
-	return &PostResponse{
+	output := types.LinkedInPostResponse{
 		ID: postID,
-	}, nil
+	}
+	return json.Marshal(output)
 }
 
 // PostWithImage is a convenience function that handles both image upload and post creation
-func (c *LinkedInClient) PostWithImage(text, imagePath string, authorType, authorID string) (*PostResponse, error) {
+func (c *LinkedInClient) PostWithImage(input []byte) ([]byte, error) {
 	// First upload the image
-	assetURN, err := c.UploadImage(imagePath)
+	inputmap := map[string]interface{}{}
+	json.Unmarshal(input, &inputmap)
+	imagepath, _ := inputmap["image_path"].(string)
+	assetURN, err := c.UploadImage(imagepath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to upload image: %v", err)
 	}
-
+	inputmap["image_url"] = assetURN
 	// Then create the post with the image
-	return c.CreateImagePost(text, assetURN, authorType, authorID)
+	bytes, _ := json.Marshal(inputmap)
+	return c.CreateImagePost(bytes)
 }
 
 // InitiateVideoUpload prepares a video upload
-func (c *LinkedInClient) InitiateVideoUpload() (string, map[string]interface{}, error) {
+func (c *LinkedInClient) InitiateVideoUpload() ([]byte, error) {
 	if c.AccessToken == "" {
-		return "", nil, errors.New("access token is required")
+		return nil, errors.New("access token is required")
 	}
 
 	// Define the asset request for video
@@ -683,12 +670,12 @@ func (c *LinkedInClient) InitiateVideoUpload() (string, map[string]interface{}, 
 
 	assetJSON, err := json.Marshal(assetData)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
 
 	req, err := http.NewRequest("POST", AssetUploadURL, bytes.NewBuffer(assetJSON))
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
 
 	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", c.AccessToken))
@@ -696,13 +683,13 @@ func (c *LinkedInClient) InitiateVideoUpload() (string, map[string]interface{}, 
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return "", nil, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"failed to initiate video upload: %s, status: %d",
 			string(bodyBytes),
 			resp.StatusCode,
@@ -711,26 +698,29 @@ func (c *LinkedInClient) InitiateVideoUpload() (string, map[string]interface{}, 
 
 	var uploadResp map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&uploadResp); err != nil {
-		return "", nil, err
+		return nil, err
 	}
 
 	// Get the upload URL and asset URN
 	value, ok := uploadResp["value"].(map[string]interface{})
 	if !ok {
-		return "", nil, errors.New("invalid upload response structure")
+		return nil, errors.New("invalid upload response structure")
 	}
 
 	uploadMechanism, ok := value["uploadMechanism"].(map[string]interface{})
 	if !ok {
-		return "", nil, errors.New("invalid upload mechanism")
+		return nil, errors.New("invalid upload mechanism")
 	}
 
 	asset, ok := value["asset"].(string)
 	if !ok {
-		return "", nil, errors.New("could not find asset URN")
+		return nil, errors.New("could not find asset URN")
 	}
-
-	return asset, uploadMechanism, nil
+	data := map[string]interface{}{
+		"asset":            asset,
+		"upload_mechanism": uploadMechanism,
+	}
+	return json.Marshal(data)
 }
 
 // UploadVideo uploads a video to LinkedIn
@@ -740,11 +730,18 @@ func (c *LinkedInClient) UploadVideo(videoPath string) (string, error) {
 	}
 
 	// First, initiate the upload
-	assetURN, uploadMechanism, err := c.InitiateVideoUpload()
+	assetURN := ""
+	var err error
+	uploadMechanism := map[string]interface{}{}
+	videoData := []byte{}
+	videoData, err = c.InitiateVideoUpload()
 	if err != nil {
 		return "", err
 	}
-
+	resp1 := map[string]interface{}{}
+	json.Unmarshal(videoData, &resp1)
+	assetURN, _ = resp1["asset"].(string)
+	uploadMechanism, _ = resp1["upload_mechanism"].(map[string]interface{})
 	// For videos, we need to use a multipart upload approach
 	// This example assumes single-part upload for simplicity
 	uploadInfo, ok := uploadMechanism["com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest"].(map[string]interface{})
@@ -792,14 +789,22 @@ func (c *LinkedInClient) UploadVideo(videoPath string) (string, error) {
 
 // CreateVideoPost creates a post with a video
 func (c *LinkedInClient) CreateVideoPost(
-	text string,
-	videoAssetURN string,
-	authorType string,
-	authorID string,
-) (*PostResponse, error) {
+	input []byte,
+) ([]byte, error) {
 	if c.AccessToken == "" {
 		return nil, errors.New("access token is required")
 	}
+	var text,
+		vidoeAssetURL,
+		authorType,
+		authorID string
+
+	inputmap := map[string]interface{}{}
+	json.Unmarshal(input, &inputmap)
+	text, _ = inputmap["text"].(string)
+	vidoeAssetURL, _ = inputmap["video_url"].(string)
+	authorType, _ = inputmap["author_type"].(string)
+	authorID, _ = inputmap["author_id"].(string)
 
 	if authorType == "" {
 		authorType = "person"
@@ -807,10 +812,12 @@ func (c *LinkedInClient) CreateVideoPost(
 
 	if authorID == "" && authorType == "person" {
 		if c.UserID == "" {
-			profile, err := c.GetUserProfile()
+			profileData, err := c.GetUserProfile()
 			if err != nil {
 				return nil, fmt.Errorf("could not determine user ID: %v", err)
 			}
+			profile := types.LinkedInUserProfile{}
+			json.Unmarshal(profileData, &profile)
 			authorID = profile.ID
 		} else {
 			authorID = c.UserID
@@ -833,7 +840,7 @@ func (c *LinkedInClient) CreateVideoPost(
 						"description": map[string]interface{}{
 							"text": "Video description",
 						},
-						"media": videoAssetURN,
+						"media": vidoeAssetURL,
 						"title": map[string]interface{}{
 							"text": "Video title",
 						},
